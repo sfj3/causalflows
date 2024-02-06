@@ -116,7 +116,7 @@ class FFModel(tf.keras.Model):
         low_1 = self.dense_low_2(low_1)
         up_1 = self.softmax(up_1)
         low_1 = self.softmax(low_1)
-        up_1 = tf.reshape(up_1,[90,144]) #these dont seem to be learning, maybe the problem is softmax isnt changing the probs 
+        up_1 = tf.reshape(up_1,[90,144])  
         low_1 = tf.reshape(low_1,[90,144])
         up_weighted = tf.cast(up_1,tf.complex64) * tf.cast(test_input[0]**2,tf.complex64)
         low_weighted = tf.cast(low_1,tf.complex64) * tf.cast(test_input[1]**2,tf.complex64)
@@ -164,8 +164,26 @@ for epoch in range(100):  # For each epoch
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))  # Update weights
 
 
+
+        
+"""
+check This
+lats = np.linspace(-90, 90, 180)  # Assuming 1 degree resolution for simplicity
+lons = np.linspace(0, 360, 360)  # Assuming 1 degree resolution for simplicity
+
+lat_idx = 43
+lon_idx = 49
+
+# Get the latitude and longitude
+lat = lats[lat_idx]
+lon = lons[lon_idx]
+
+lat, lon
+"""
+
 #use log prob or something else.., play around with different loss functions
 # play with learning rate add a schedule
 #play with convolutional and imaginary convolutional layers 
 #play with distribution
-#add some type of other state classifier or a transformer... 
+#add some type of other state classifier or a transformer... look especially at points it DOESNT get right and possible processes
+#map out all converged upon points of interest
