@@ -11,7 +11,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras import layers, models, optimizers
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0 = all messages are logged, 1 = INFO messages are not printed, 2 = INFO and WARNING messages are not printed, 3 = INFO, WARNING, and ERROR messages are not printed
-
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+#see why still logging error messages, or just do the abs instead of casting lol...
 tfd = tfp.distributions
 tfb = tfp.bijectors
 tfk = tf.keras
@@ -122,8 +123,8 @@ class FFModel(tf.keras.Model):
         low_weighted = tf.cast(low_1,tf.complex64) * tf.cast(test_input[1]**2,tf.complex64)
         up_weight = tf.reduce_sum(up_weighted)
         low_weight = tf.reduce_sum(low_weighted)
-        values = tf.concat([[up_weight], tf.fill([363], tf.constant(20, dtype=tf.complex64)), [low_weight]], 0)#try other values for the constant here
-        inv_vals = tf.sqrt(tf.math.real(tf.signal.ifft(values))/365)
+        values = tf.concat([[up_weight], tf.fill([363], tf.constant(20, dtype=tf.complex64)), [low_weight]], 0)#try other values for the constant here, maybe use the actual ft
+        inv_vals = tf.sqrt(tf.math.abs(tf.signal.ifft(values))/365)
         # Compute the statistics from `inv_vals`
         min_val = tf.reduce_min(inv_vals[1:])#the first value is kinda strange
         max_val = tf.reduce_max(inv_vals[1:])
@@ -150,7 +151,7 @@ model_inputs, actual_data = create_training_data(dataset)
 
 # Instantiate and compile the model
 model = FFModel(num_transformations=1)
-optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=0.005)#add a learning rate schedule
+optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=0.001)#add a learning rate schedule
 loss_fn = tf.keras.losses.MeanSquaredError()
 i = 0
 for epoch in range(100):  # For each epoch
@@ -158,7 +159,7 @@ for epoch in range(100):  # For each epoch
         with tf.GradientTape() as tape:
             predictions = model(inputs, training=True)  # Forward pass
             loss = loss_fn(tf.sort(targets,axis=0), tf.sort(predictions[0],axis=0)) + tf.square(tf.square(tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32) - tf.cast(tf.math.reduce_sum(tf.cast(predictions[0] < 273.15, tf.float32)), tf.float32)))
-            print('loss',loss,'step',i,'days',tf.square(tf.square(tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32) - tf.cast(tf.math.reduce_sum(tf.cast(predictions[0] < 273.15, tf.float32)), tf.float32))))
+            print('loss',loss,'step',i,'days',tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32) - tf.cast(tf.math.reduce_sum(tf.cast(predictions[0] < 273.15, tf.float32)), tf.float32))
             i = i + 1
         gradients = tape.gradient(loss, model.trainable_variables)  # Compute gradients
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))  # Update weights
@@ -187,3 +188,13 @@ lat, lon
 #play with distribution
 #add some type of other state classifier or a transformer... look especially at points it DOESNT get right and possible processes
 #map out all converged upon points of interest
+#papa new guinea indian ocean region of interest.... validate
+#also look into using the full fourier transform when doing the weighted average, if its computationally feasible 
+#try making it more global by restarting from scratch when loss exceeds a certain amount... 
+#for monday, over multiple runs track the point of interest for the best ones.  
+#maybe use extre4me weighting in the loss function
+#compare to MADE
+#look into pre shift variablility
+#use something as input to weights?, check initial shape of weights
+#train over multiple random points to get it more generalized
+#add more flow layers
