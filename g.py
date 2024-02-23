@@ -70,39 +70,70 @@ model_inputs,actual_data = create_training_data(dataset)
 
 
 class FFModel(tf.keras.Model):
+    def calculate_adjustment(self, transformed_samples):
+        # Determine the number of samples under the threshold (273 in this case)
+        num_under_threshold = tf.reduce_sum(tf.cast(transformed_samples < 273, tf.float32))
+        
+        # Calculate the adjustment factor based on the deviation from the expected number (2)
+        expected_num_under_threshold = 2.0
+        adjustment_factor = tf.sqrt(expected_num_under_threshold / (num_under_threshold + 1e-6))
+        
+        # Calculate an adjusted shift to apply based on the current distribution
+        # For example, if too many values are under 273, increase the shift
+        median_val = tfp.stats.percentile(transformed_samples, 50.0)
+        target_median = 273.0  # Adjust this target as needed
+        adjusted_shift = (target_median - median_val) * 0.1  # Scale adjustment to be gradual
+
+        return adjustment_factor, adjusted_shift
+
+    def ensure_expected_range(self, transformed_samples):
+        # Adjust this method if you have a specific range in mind
+        # For now, just an example to ensure values aren't too low
+        min_val = 273  # Ensure no values are below this
+        return tf.maximum(transformed_samples, min_val)
     def __init__(self, num_transformations=1):
         super(FFModel, self).__init__()
         # Layers for processing
         self.batch_up = tf.keras.layers.BatchNormalization()
         self.batch_low = tf.keras.layers.BatchNormalization()
-        self.dense_up = tf.keras.layers.Dense(90*144, activation='relu')
-        self.dense_low = tf.keras.layers.Dense(90*144, activation='relu')
-        self.dense_up_2 = tf.keras.layers.Dense(90*144, activation='relu')
-        self.dense_low_2 = tf.keras.layers.Dense(90*144, activation='relu')
+        self.dense_up = tf.keras.layers.Dense(90*144, activation='tanh')
+        self.dense_low = tf.keras.layers.Dense(90*144, activation='tanh')
+        self.dense_up_2 = tf.keras.layers.Dense(90*144)
+        self.dense_low_2 = tf.keras.layers.Dense(90*144)
         self.num_transformations = num_transformations
         self.softmax = tf.keras.layers.Softmax()
         # Shift and scale parameters
         self.c = tf.keras.Sequential([
             tf.keras.layers.Reshape((90, 144, 1), input_shape=(90, 144)),  # Add channel dimension
-            tf.keras.layers.Conv2D(filters=32, kernel_size=(3, 3), strides=(3, 3), padding='same', activation='relu'),
-            tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), strides=(3, 3), padding='same', activation='relu'),
             tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(100),
+            tf.keras.layers.Dense(100,activation='tanh'),
             tf.keras.layers.Reshape((10, 10))  # Reshape to desired output
         ])
         self.d = tf.keras.Sequential([
             tf.keras.layers.Reshape((90, 144, 1), input_shape=(90, 144)),  # Add channel dimension
-            tf.keras.layers.Conv2D(filters=32, kernel_size=(3, 3), strides=(3, 3), padding='same', activation='relu'),
-            tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), strides=(3, 3), padding='same', activation='relu'),
             tf.keras.layers.Flatten(),
             tf.keras.layers.Dense(100),
             tf.keras.layers.Reshape((10, 10))  # Reshape to desired output
         ])
         self.shift = tf.Variable(initial_value=4*tf.ones(365), trainable=True, dtype=tf.float32)
         self.scale = tf.Variable(initial_value=1.1*tf.ones(365),trainable=True,dtype=tf.float32)
+        self.adaptive_shift_net = tf.keras.Sequential([
+            tf.keras.layers.Dense(64),
+            tf.keras.layers.Dense(365)  # Outputs shift values
+        ])
+        self.adaptive_scale_net = tf.keras.Sequential([
+            tf.keras.layers.Dense(64),
+            tf.keras.layers.Dense(365,activation='tanh'),
+            tf.keras.layers.Dense(365,activation='relu')  # Outputs scale values
+        ])
+        # Transformation interaction network
+        self.transformation_interaction_net = tf.keras.Sequential([
+            tf.keras.layers.Dense(128),
+            tf.keras.layers.Dense(365)  # Outputs transformed samples
+        ])
     def call(self, inputs):
 
-        test_input = inputs
+        test_input = inputs#nice
         up = tf.reshape(self.c(tf.reshape(tf.math.abs(test_input[0]),[1,90,144])),[1,100])
         low = tf.reshape(self.d(tf.reshape(tf.math.abs(test_input[-1]),[1,90,144])),[1,100])
         normalized_low = low# (low - tf.reduce_min(low)) / (tf.reduce_max(low) - tf.reduce_min(low))
@@ -122,6 +153,10 @@ class FFModel(tf.keras.Model):
         up_weighted = tf.cast(up_1,tf.complex64) * tf.cast(test_input[0]**2,tf.complex64)
         low_weighted = tf.cast(low_1,tf.complex64) * tf.cast(test_input[1]**2,tf.complex64)
         up_weight = tf.reduce_sum(up_weighted)
+        print('lat index',divmod(tf.argmax(tf.reshape(up_1, [-1])).numpy(), up_1.shape[1])[0])
+        print('lng index',divmod(tf.argmax(tf.reshape(up_1, [-1])).numpy(), up_1.shape[1])[1])
+        print('california lat lng',lat_idx,lon_idx)
+        #total is 90 latitude points by 144 longitude points over the earth grid. 
         low_weight = tf.reduce_sum(low_weighted)
         values = tf.concat([[up_weight], tf.fill([363], tf.constant(20, dtype=tf.complex64)), [low_weight]], 0)#try other values for the constant here, maybe use the actual ft
         inv_vals = tf.sqrt(tf.math.abs(tf.signal.ifft(values))/365)
@@ -139,14 +174,29 @@ class FFModel(tf.keras.Model):
 
         # Sample from the distribution
         samples = truncated_normal_dist.sample(365)
-        transformed_samples = []
-        
-        transformed_sample = (samples) * self.scale + self.shift
-        transformed_samples.append(transformed_sample)
+        samples = truncated_normal_dist.sample(365)
+        inv_vals_expanded = tf.expand_dims(inv_vals, axis=0)  # Add batch dimension
 
-        return transformed_samples
+        # Initial calculation of adaptive shift and scale
+        shift_values = self.adaptive_shift_net(inv_vals_expanded)
+        scale_values = self.adaptive_scale_net(inv_vals_expanded)
 
-# Assuming create_training_data is defined
+        # Apply initial transformation
+        transformed_samples = samples + scale_values * shift_values
+
+        # Dynamic adjustment mechanism
+        for _ in range(3):  # Iterate adjustment process, can be tuned
+            adjustment_factor, adjusted_shift = self.calculate_adjustment(transformed_samples)
+            shift_values += adjusted_shift
+            scale_values *= adjustment_factor
+            transformed_samples = samples + scale_values * shift_values
+
+        # Final adjustment to ensure outputs are in the expected range
+        final_transformed_samples = self.ensure_expected_range(transformed_samples)
+
+        return final_transformed_samples
+
+#break further
 model_inputs, actual_data = create_training_data(dataset)
 
 # Instantiate and compile the model
@@ -158,8 +208,12 @@ for epoch in range(100):  # For each epoch
     for inputs, targets in zip(model_inputs, actual_data):  # Iterate through each set
         with tf.GradientTape() as tape:
             predictions = model(inputs, training=True)  # Forward pass
-            loss = loss_fn(tf.sort(targets,axis=0), tf.sort(predictions[0],axis=0)) + tf.square(tf.square(tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32) - tf.cast(tf.math.reduce_sum(tf.cast(predictions[0] < 273.15, tf.float32)), tf.float32)))
-            print('loss',loss,'step',i,'days',tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32) - tf.cast(tf.math.reduce_sum(tf.cast(predictions[0] < 273.15, tf.float32)), tf.float32))
+            l1=0
+            #if(tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32) >0):
+            l1 = tf.square(tf.square(tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32) - tf.cast(tf.math.reduce_sum(tf.cast(predictions[0] < 273.15, tf.float32)), tf.float32)))
+            loss = loss_fn(tf.sort(targets,axis=0), tf.sort(predictions[0],axis=0)) #+ l1
+            
+            print('loss',loss,'step',i,'days',tf.cast(tf.math.reduce_sum(tf.cast(targets < 273.15, tf.float32)), tf.float32), 'other', (tf.cast(tf.math.reduce_sum(tf.cast(predictions[0] < 273.15, tf.float32)), tf.float32)))
             i = i + 1
         gradients = tape.gradient(loss, model.trainable_variables)  # Compute gradients
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))  # Update weights
